@@ -1,206 +1,177 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
+import requests
 import plotly.express as px
-import plotly.graph_objects as go
-import numpy as np
 from datetime import datetime
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Comex.io | Light", page_icon="🚢", layout="wide")
+# --- CONFIGURAÇÃO ---
+st.set_page_config(page_title="E-Comex Tracker", page_icon="🛍️", layout="wide")
 
-# --- CSS LIGHT MODE (CLARO) ---
+# --- CSS LIGHT MODE ---
 st.markdown("""
 <style>
-    /* Fundo Branco e Texto Escuro */
-    .stApp { background-color: #f8f9fa; color: #212529; }
-    
-    /* Títulos em Azul Corporativo */
-    h1, h2, h3 { color: #0d47a1 !important; font-family: 'Segoe UI', sans-serif; }
-    
-    /* Cards de Métricas (Brancos com sombra suave) */
+    .stApp { background-color: #f5f5f7; color: #1d1d1f; }
+    h1, h2, h3 { color: #0071e3 !important; font-family: 'Helvetica Neue', sans-serif; }
     div[data-testid="stMetric"] {
-        background-color: #ffffff;
-        border: 1px solid #e9ecef;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        background-color: white; border-radius: 12px; padding: 15px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid #e5e5e5;
     }
-    div[data-testid="stMetricLabel"] { color: #6c757d; font-weight: bold; }
-    div[data-testid="stMetricValue"] { color: #0d47a1; }
-    
-    /* Ajuste de tabelas */
-    div[data-testid="stDataFrame"] { border: 1px solid #dee2e6; }
+    div[data-testid="stImage"] img { border-radius: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÃO DE DADOS DE SEGURANÇA (FALLBACK REALISTA) ---
-def generate_fallback_data():
+# --- FUNÇÃO 1: CÂMBIO REAL (AWESOME API) ---
+@st.cache_data(ttl=60) # Atualiza a cada 1 min
+def get_real_currency():
     """
-    Gera dados simulados com valores ATUAIS de mercado (2025/26)
-    para caso o Yahoo Finance bloqueie a conexão.
+    Pega a cotação oficial e atualizada via AwesomeAPI (Melhor que Yahoo para BRL).
     """
-    dates = pd.date_range(end=datetime.now(), periods=60, freq='B')
-    n = len(dates)
-    
-    return pd.DataFrame({
-        # Valores calibrados para o mercado atual (Dolar ~5.80, Yuan ~0.80)
-        'Dolar': 5.80 + np.random.normal(0, 0.03, n).cumsum(),
-        'Yuan': 0.80 + np.random.normal(0, 0.005, n).cumsum(),
-        # Commodities
-        'Soja': 1150 + np.random.normal(0, 8, n).cumsum(),
-        'Petroleo': 70 + np.random.normal(0, 1.2, n).cumsum(),
-        'Minerio': 60 + np.random.normal(0, 0.8, n).cumsum()
-    }, index=dates)
-
-# --- FUNÇÃO DE COLETA REAL ---
-@st.cache_data(ttl=300)
-def get_comex_data():
-    tickers = {
-        'Dolar': 'BRL=X',       # USD -> BRL
-        'Yuan': 'CNYBRL=X',     # CNY -> BRL
-        'Soja': 'ZS=F',         # Soja Futuro
-        'Petroleo': 'CL=F',     # Petróleo WTI
-        'Minerio': 'VALE3.SA'   # Vale (Proxy de Minério)
-    }
+    # USD-BRL e CNY-BRL (Yuan)
+    url = "https://economia.awesomeapi.com.br/last/USD-BRL,CNY-BRL"
     
     try:
-        # Tenta baixar os últimos 5 dias (mais rápido e preciso)
-        df = yf.download(list(tickers.values()), period="1mo", interval="1d", progress=False)
-        
-        if isinstance(df.columns, pd.MultiIndex):
-            df = df['Close']
-        
-        if df.empty: return generate_fallback_data(), False
+        r = requests.get(url, timeout=3)
+        if r.status_code == 200:
+            data = r.json()
+            return {
+                'Dolar': float(data['USDBRL']['bid']),
+                'Dolar_Var': float(data['USDBRL']['pctChange']),
+                'Yuan': float(data['CNYBRL']['bid']),
+                'Yuan_Var': float(data['CNYBRL']['pctChange']),
+                'Time': datetime.now().strftime("%H:%M")
+            }
+    except:
+        pass
+    
+    # Fallback de emergência (mas a AwesomeAPI raramente falha)
+    return {'Dolar': 5.35, 'Dolar_Var': 0.0, 'Yuan': 0.75, 'Yuan_Var': 0.0, 'Time': 'N/A'}
 
-        # Renomeia colunas
-        cols_existentes = {v: k for k, v in tickers.items() if v in df.columns}
-        df = df[list(cols_existentes.keys())].rename(columns=cols_existentes)
-        
-        # Preenche colunas faltantes com valor fixo se necessário
-        for nome_col in tickers.keys():
-            if nome_col not in df.columns:
-                df[nome_col] = 0.0
-        
-        df = df.ffill().dropna()
-        
-        if len(df) < 2: return generate_fallback_data(), False
-        
-        return df, True
+# --- FUNÇÃO 2: PRODUTOS REAIS (MERCADO LIVRE API) ---
+@st.cache_data(ttl=300)
+def get_ml_products(query):
+    """
+    Busca produtos reais no Mercado Livre Brasil.
+    """
+    url = f"https://api.mercadolibre.com/sites/MLB/search?q={query}&limit=20"
+    
+    try:
+        r = requests.get(url)
+        if r.status_code == 200:
+            data = r.json()
+            products = []
+            
+            for item in data['results']:
+                products.append({
+                    'Foto': item['thumbnail'],
+                    'Produto': item['title'],
+                    'Preço (R$)': item['price'],
+                    'Link': item['permalink']
+                })
+            
+            return pd.DataFrame(products)
+    except:
+        pass
+    return pd.DataFrame()
 
-    except Exception:
-        return generate_fallback_data(), False
+# --- CARGA DE DADOS ---
+cambio = get_real_currency()
 
-# --- CARGA E CÁLCULOS ---
-df_market, is_real_data = get_comex_data()
-
-# Seleção segura de datas
-if len(df_market) >= 2:
-    hoje = df_market.iloc[-1]
-    ontem = df_market.iloc[-2]
-    data_ref = df_market.index[-1].strftime('%d/%m/%Y')
-else:
-    # Caso extremo
-    st.error("Erro crítico na base de dados.")
-    st.stop()
-
-# Cálculo Volume FOB (Estimado)
-df_market['Volume_FOB_Mi'] = (df_market['Soja'] * 1.5) + (df_market['Petroleo'] * 2.0) + (df_market['Minerio'] * 5.0)
-vol_hoje = df_market['Volume_FOB_Mi'].iloc[-1]
-vol_ontem = df_market['Volume_FOB_Mi'].iloc[-2]
-
-# Cálculo Destaque do Mês
-idx_30d = -22 if len(df_market) >= 22 else 0
-data_old = df_market.iloc[idx_30d]
-
-ranking = {
-    'Soja': (hoje['Soja'] - data_old['Soja']) / data_old['Soja'],
-    'Petróleo': (hoje['Petroleo'] - data_old['Petroleo']) / data_old['Petroleo'],
-    'Minério': (hoje['Minerio'] - data_old['Minerio']) / data_old['Minerio']
-}
-produto_top = max(ranking, key=ranking.get)
-perf_top = ranking[produto_top] * 100
-
-# --- DASHBOARD (LIGHT MODE) ---
-
-# Sidebar
+# --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/container-truck.png", width=80)
-    st.title("Comex.io")
+    st.image("https://img.icons8.com/3d-fluency/96/box.png", width=80)
+    st.title("E-Comex")
+    st.caption("Importação & Revenda")
     st.markdown("---")
     
-    if is_real_data:
-        st.success(f"🟢 Dados: Yahoo Finance\nRef: {data_ref}")
-    else:
-        st.warning(f"🟠 Dados: Estimativa de Mercado\nRef: {data_ref}")
-        st.caption("Conexão instável. Usando valores projetados.")
+    # Seletor de Categoria
+    categoria = st.selectbox(
+        "📦 O que vamos importar?",
+        ["Xiaomi Redmi", "Drone DJI", "Fones Bluetooth", "Smartwatch", "Alexa Echo"]
+    )
+    
+    st.info(f"Cotação Atualizada às {cambio['Time']}")
 
-# Cabeçalho
-st.title(f"Painel de Exportação")
-st.markdown(f"**Data de Referência:** {data_ref} | Monitoramento Estratégico")
+# --- DASHBOARD ---
+st.title(f"Monitor de Importação: {categoria}")
 
-# Cards (KPIs)
+# 1. LINHA DO CÂMBIO (MOEDAS)
 col1, col2, col3, col4 = st.columns(4)
 
-def card_metric(col, label, valor, delta, prefix="R$ "):
-    col.metric(label, f"{prefix}{valor:.3f}", f"{delta:.3f}")
+with col1:
+    st.metric("🇺🇸 Dólar Hoje", f"R$ {cambio['Dolar']:.3f}", f"{cambio['Dolar_Var']}%")
+with col2:
+    st.metric("🇨🇳 Yuan Chinês", f"R$ {cambio['Yuan']:.3f}", f"{cambio['Yuan_Var']}%")
 
-with col1: card_metric(st, "🇺🇸 Dólar (PTAX/Com)", hoje['Dolar'], hoje['Dolar']-ontem['Dolar'])
-with col2: card_metric(st, "🇨🇳 Yuan (CNY)", hoje['Yuan'], hoje['Yuan']-ontem['Yuan'])
-with col3: card_metric(st, "📦 Vol. Diário (FOB)", vol_hoje, vol_hoje-vol_ontem, "US$ ")
-with col4: st.metric("⭐ Destaque Mês", produto_top, f"{perf_top:.1f}%")
+# Busca Produtos
+df_prod = get_ml_products(categoria)
 
+if not df_prod.empty:
+    media_preco = df_prod['Preço (R$)'].mean()
+    min_preco = df_prod['Preço (R$)'].min()
+    
+    # Estimativa de Custo na China (Chutando 40% do valor Brasil)
+    custo_china_usd = (media_preco * 0.40) / cambio['Dolar']
+    
+    with col3:
+        st.metric("🇧🇷 Preço Médio Brasil", f"R$ {media_preco:.2f}")
+    with col4:
+        st.metric("🇨🇳 Custo Est. China (FOB)", f"US$ {custo_china_usd:.2f}", help="Estimado em 40% do valor de venda")
+
+    st.markdown("---")
+
+    # 2. ANÁLISE VISUAL E TABELA
+    c_chart, c_table = st.columns([1, 2])
+    
+    with c_chart:
+        st.subheader("📊 Distribuição de Preços")
+        fig = px.histogram(
+            df_prod, 
+            x="Preço (R$)", 
+            nbins=10, 
+            title=f"Variação de Preço: {categoria}",
+            color_discrete_sequence=['#0071e3']
+        )
+        fig.update_layout(template="plotly_white", plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.info("💡 **Dica:** Preços muito baixos podem ser peças de reposição ou acessórios.")
+
+    with c_table:
+        st.subheader("🛒 Top Produtos Encontrados")
+        
+        # Configuração da Tabela com IMAGENS (Recurso Pro do Streamlit)
+        st.dataframe(
+            df_prod,
+            column_config={
+                "Foto": st.column_config.ImageColumn("Preview", width="small"),
+                "Link": st.column_config.LinkColumn("Ver no Site"),
+                "Preço (R$)": st.column_config.NumberColumn(format="R$ %.2f")
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=400
+        )
+
+else:
+    st.warning("Não foi possível carregar os produtos do Mercado Livre no momento.")
+
+# 3. CALCULADORA DE IMPORTAÇÃO RÁPIDA
 st.markdown("---")
-
-# Gráficos (Tema Claro)
-c_left, c_right = st.columns([2, 1])
-
-with c_left:
-    st.subheader("📈 Evolução do Câmbio (USD/BRL)")
-    # Gráfico de Linha Clean
-    fig_line = px.line(df_market, y="Dolar", title="Tendência do Dólar (30 Dias)")
+with st.expander("🧮 Calculadora Rápida de Importação (Simulação)", expanded=True):
+    col_a, col_b, col_c = st.columns(3)
     
-    # Ajuste para tema claro (Plotly White)
-    fig_line.update_layout(
-        template="plotly_white",
-        plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor='#e9ecef'),
-        font=dict(color="#333")
-    )
-    fig_line.update_traces(line_color='#0d47a1', line_width=3)
-    st.plotly_chart(fig_line, use_container_width=True)
-
-with c_right:
-    st.subheader("🚢 Mix de Commodities")
-    valores = [hoje['Soja'], hoje['Petroleo'], hoje['Minerio']]
+    valor_dolar = col_a.number_input("Preço no Fornecedor (US$)", value=10.0, step=1.0)
+    taxa_imposto = col_b.slider("Imposto de Importação (%)", 0, 100, 60)
+    margem = col_c.slider("Margem de Lucro Desejada (%)", 0, 100, 30)
     
-    # Gráfico de Pizza Clean
-    fig_pie = go.Figure(data=[go.Pie(
-        labels=['Soja', 'Petróleo', 'Minério'], 
-        values=valores, 
-        hole=.5,
-        marker=dict(colors=['#4caf50', '#2196f3', '#ff9800']) # Cores claras e distintas
-    )])
+    # Contas
+    custo_brl = valor_dolar * cambio['Dolar']
+    custo_com_imposto = custo_brl * (1 + (taxa_imposto/100))
+    preco_venda = custo_com_imposto * (1 + (margem/100))
     
-    fig_pie.update_layout(
-        template="plotly_white",
-        showlegend=True,
-        legend=dict(orientation="h", y=-0.1),
-        margin=dict(t=0, b=0, l=0, r=0)
-    )
-    st.plotly_chart(fig_pie, use_container_width=True)
-
-# Tabela
-st.markdown("---")
-st.subheader("📋 Histórico Recente")
-
-# Formatação da tabela para ficar bonita no tema claro
-st.dataframe(
-    df_market.tail(10).sort_index(ascending=False).style.format("{:.2f}"),
-    use_container_width=True
-)
-
-# Download
-csv = df_market.to_csv().encode('utf-8')
-st.download_button("📥 Baixar Relatório (CSV)", csv, "comex_data.csv", "text/csv")
+    st.markdown(f"""
+    ### Resultado da Simulação:
+    * Custo do Produto: **R$ {custo_brl:.2f}**
+    * Custo Final (com Imposto): **R$ {custo_com_imposto:.2f}**
+    * **Preço de Venda Sugerido: R$ {preco_venda:.2f}**
+    """)
